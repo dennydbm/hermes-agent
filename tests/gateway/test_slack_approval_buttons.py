@@ -122,6 +122,50 @@ class TestSlackExecApproval:
             assert e["value"] == "agent:main:slack:group:C1:1111"
 
     @pytest.mark.asyncio
+    async def test_post_without_ts_is_ambiguous_not_confirmed(self):
+        adapter = _make_adapter()
+        client = adapter._team_clients["T1"]
+        client.chat_postMessage = AsyncMock(return_value={"ok": True})
+
+        result = await adapter.send_exec_approval(
+            chat_id="C1", command="fixture", session_key="sk",
+            metadata={"thread_id": "1111", "slack_team_id": "T1"},
+        )
+
+        assert result.success is False
+        assert not result.message_id
+        assert result.raw_response["ambiguous"] is True
+        assert adapter._approval_resolved == {}
+        client.chat_postMessage.assert_awaited_once()
+        assert client.chat_postMessage.call_args.kwargs["channel"] == "C1"
+        assert client.chat_postMessage.call_args.kwargs["thread_ts"] == "1111"
+
+    @pytest.mark.asyncio
+    async def test_slack_rejection_never_counts_as_post_even_with_ts(self):
+        adapter = _make_adapter()
+        client = adapter._team_clients["T1"]
+        client.chat_postMessage = AsyncMock(return_value={"ok": False, "ts": "1234.5678", "error": "channel_not_found"})
+
+        result = await adapter.send_exec_approval(chat_id="C1", command="fixture", session_key="sk")
+
+        assert result.success is False
+        assert adapter._approval_resolved == {}
+        client.chat_postMessage.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_post_timeout_is_ambiguous_without_retry(self):
+        adapter = _make_adapter()
+        client = adapter._team_clients["T1"]
+        client.chat_postMessage = AsyncMock(side_effect=TimeoutError("lost response"))
+
+        result = await adapter.send_exec_approval(chat_id="C1", command="fixture", session_key="sk")
+
+        assert result.success is False
+        assert result.raw_response["ambiguous"] is True
+        assert adapter._approval_resolved == {}
+        client.chat_postMessage.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_smart_deny_owner_override_hides_persistent_buttons(self):
         adapter = _make_adapter()
         mock_client = adapter._team_clients["T1"]
