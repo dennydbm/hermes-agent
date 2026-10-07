@@ -94,6 +94,21 @@ class TestSlackSendClarify:
         _clear_clarify_state()
 
     @pytest.mark.asyncio
+    async def test_missing_ts_cannot_confirm_clarify_card(self):
+        adapter = _make_adapter()
+        client = adapter._team_clients["T1"]
+        client.chat_postMessage = AsyncMock(return_value={"ok": True})
+        result = await adapter.send_clarify(
+            chat_id="C1", question="Choose", choices=["a", "b"],
+            clarify_id="cid1", session_key="sk1", metadata={"thread_id": "1111"},
+        )
+        assert result.success is False
+        assert result.raw_response["ambiguous"] is True
+        assert adapter._clarify_resolved == {}
+        client.chat_postMessage.assert_awaited_once()
+        assert client.chat_postMessage.call_args.kwargs["thread_ts"] == "1111"
+
+    @pytest.mark.asyncio
     async def test_multi_choice_renders_buttons_and_other(self):
         adapter = _make_adapter()
         mock_client = adapter._team_clients["T1"]

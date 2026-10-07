@@ -4931,14 +4931,35 @@ class SlackAdapter(BasePlatformAdapter):
             result = await self._post_interactive_blocks(
                 chat_id, text, blocks, metadata, sanitize=sanitize, team_scoped=team_scoped_key)
             msg_ts = result.get("ts", "")
-            if msg_ts and resolved is not None:
+            thread_ts = self._resolve_thread_ts(None, metadata)
+            if result.get("ok") is False:
+                logger.warning("[Slack] %s rejected: channel=%s thread_ts=%s", label, chat_id, thread_ts)
+                return SendResult(success=False, error="Slack rejected interactive post", raw_response=result)
+            if not isinstance(msg_ts, str) or not msg_ts.strip():
+                # A successful HTTP call without a message ts does not prove Slack posted
+                # the card. It may still have posted: an automatic text fallback would
+                # duplicate the prompt (or evade a connector's egress decision).
+                logger.warning("[Slack] %s missing message ts: channel=%s thread_ts=%s; outcome ambiguous",
+                               label, chat_id, thread_ts)
+                return SendResult(success=False, error="Slack interactive post has no message ts",
+                                  raw_response={"ambiguous": True, "error": "missing message ts"})
+            if resolved is not None:
                 key = msg_ts
                 if team_scoped_key:
                     key = self._workspace_message_marker(self._metadata_team_id(metadata), msg_ts)
                 resolved[key] = False
                 self._trim_oldest_dict_entries(resolved, resolved_max)
+            logger.info("[Slack] %s ACK: channel=%s thread_ts=%s message_ts=%s",
+                        label, chat_id, thread_ts, msg_ts)
             return SendResult(success=True, message_id=msg_ts, raw_response=result)
         except Exception as e:
+            if _is_transient_transport_error(e):
+                # A post can succeed at Slack while its transport ACK is lost.
+                # Suppress text fallback and any re-send; the decision waiter remains bounded.
+                logger.warning("[Slack] %s transport outcome ambiguous: channel=%s thread_ts=%s",
+                               label, chat_id, self._resolve_thread_ts(None, metadata))
+                return SendResult(success=False, error="Slack interactive post transport outcome unknown",
+                                  raw_response={"ambiguous": True, "error": "transport ACK unavailable"})
             logger.error("[Slack] %s failed: %s", label, e, exc_info=True)
             return SendResult(success=False, error=str(e))
 
