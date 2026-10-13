@@ -1,0 +1,110 @@
+# Owner action: add this file as .github/workflows/manual-approval-image.yml
+# to dennydbm/hermes-agent main, then trigger it manually in GitHub Actions.
+# This is a BUILD ONLY: no Coolify webhook, no production credentials, no deploy.
+name: Manual approval-fix image (pinned)
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build_test_publish:
+    if: github.repository == 'dennydbm/hermes-agent' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TARGET_SHA: 0a6fd13f6d94133a7affca239d6cf39385d55029
+      LOCAL_IMAGE: hermes-approval:validated
+      REGISTRY_IMAGE: ghcr.io/dennydbm/hermes-agent-approval-fix:0a6fd13f6d94133a7affca239d6cf39385d55029
+    steps:
+      - name: Checkout exact reviewed commit
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: 0a6fd13f6d94133a7affca239d6cf39385d55029
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Confirm identity and exclude profile exports
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          python3 scripts/ci/check_profile_archive_boundary.py
+
+      - name: Write Docker install stamp for the target commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/write_install_stamp.py --output install-stamp.json \
+            --commit "$TARGET_SHA" --distribution docker \
+            --update-mechanism external --source ci
+          python3 -c 'import json,os; s=json.load(open("install-stamp.json")); assert s["commit"]==os.environ["TARGET_SHA"]'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build image locally for validation (no push)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: hermes-approval:validated
+          labels: |
+            org.opencontainers.image.source=https://github.com/dennydbm/hermes-agent
+            org.opencontainers.image.revision=0a6fd13f6d94133a7affca239d6cf39385d55029
+
+      - name: Keep stamp while provisioning locked test environment
+        shell: bash
+        run: mv install-stamp.json "$RUNNER_TEMP/install-stamp.json"
+
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '[]'
+          test-environment: 'true'
+          prune-python-cache: true
+
+      - name: Restore image stamp
+        shell: bash
+        run: mv "$RUNNER_TEMP/install-stamp.json" install-stamp.json
+
+      - name: Run Docker integration tests against built image
+        shell: bash
+        env:
+          HERMES_TEST_IMAGE: hermes-approval:validated
+          HERMES_TEST_WORKERS: '2'
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
+        run: scripts/run_tests.sh tests/docker/
+
+      - name: Check runtime stamp without starting a gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python3 "$LOCAL_IMAGE" -c \
+            'import json,sys; s=json.load(open("/opt/hermes/install-stamp.json")); assert s["commit"] == sys.argv[1], s' \
+            "$TARGET_SHA"
+
+      - name: Authenticate to GHCR after all tests pass
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the tested local image and read back registry digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker tag "$LOCAL_IMAGE" "$REGISTRY_IMAGE"
+          docker push "$REGISTRY_IMAGE"
+          docker buildx imagetools inspect "$REGISTRY_IMAGE" --format '{{json .Manifest}}' > "$RUNNER_TEMP/manifest.json"
+          python3 -c 'import json,os,re; d=json.load(open(os.environ["RUNNER_TEMP"]+"/manifest.json"))["digest"]; assert re.fullmatch(r"sha256:[0-9a-f]{64}",d),d; print("Verified image: "+os.environ["REGISTRY_IMAGE"].split(":")[0]+"@"+d); open(os.environ["GITHUB_STEP_SUMMARY"],"a").write("Verified image: `"+os.environ["REGISTRY_IMAGE"].split(":")[0]+"@"+d+"`\n")'
