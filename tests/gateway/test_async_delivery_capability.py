@@ -89,14 +89,14 @@ class TestDeclareStatelessChannel:
             reset_session_vars()
 
 
-class TestStatelessChannelForcesSyncDelegation:
-    """The behavioral contract: a stateless channel must run delegations INLINE.
+class TestStatelessChannelRejectsBackgroundDelegation:
+    """A stateless binding is not permission to silently change background intent.
 
     This is the regression that #53027 / #63142 describe — a background dispatch
     on a channel that can never deliver the completion.
     """
 
-    def test_background_delegation_runs_inline_when_channel_is_stateless(
+    def test_background_delegation_is_unsupported_without_consumer(
         self, monkeypatch
     ):
         import tools.delegate_tool as dt
@@ -108,12 +108,14 @@ class TestStatelessChannelForcesSyncDelegation:
 
         fake_child = type("C", (), {"_subagent_id": "s1"})()
         dispatched = []
+        ran = []
 
         def _fake_dispatch(*a, **kw):
             dispatched.append(kw)
             return {"delegation_id": "deleg_x"}
 
         def _child(task_index, goal, child=None, parent_agent=None, **kw):
+            ran.append(goal)
             return {
                 "task_index": 0, "status": "completed", "summary": f"done: {goal}",
                 "api_calls": 1, "duration_seconds": 0.1, "model": "m",
@@ -143,10 +145,10 @@ class TestStatelessChannelForcesSyncDelegation:
         parsed = json.loads(out)
         # The whole point: NOT dispatched to a channel that can't deliver.
         assert not dispatched, "stateless channel must not dispatch a detached child"
-        assert parsed.get("status") != "dispatched"
-        # The caller gets the actual work product, in-turn.
-        assert "results" in parsed
-        assert "done: review the spec" in json.dumps(parsed)
+        assert not ran, "background request must not execute inline"
+        assert parsed["status"] == "unsupported"
+        assert parsed["count"] == 0
+        assert parsed["rejected_tasks"][0]["start_state"] == "not_started"
 
 
 # ---------------------------------------------------------------------------
