@@ -1,4 +1,4 @@
-"""A rejected background batch retains synchronous cancellation ownership."""
+"""Rejected background children never start; accepted workers retain async cancellation."""
 
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ class _ControlledChild(_Parent):
         return {"api_call_count": 0}
 
     def close(self):
-        self.closed_while_running |= not self.finished.is_set()
+        self.closed_while_running |= self.started.is_set() and not self.finished.is_set()
         self.close_count += 1
         self.closed.set()
 
@@ -220,49 +220,42 @@ def test_rejected_background_child_stops_with_parent(
         if stop_timing == "during_admission":
             request_stop(stop_message)
         continue_admission.set()
-        assert child.started.wait(5)
-        if stop_timing == "running":
-            request_stop(stop_message)
-
-        assert child.stop_received.wait(5), "fallback lost parent cancellation ownership"
-        assert child.unwinding.wait(5)
-        assert child.observed_interrupt == (stop_message, stop_kind == "hard")
-        if background_child is not None:
-            assert not background_child.stop_received.is_set()
-            assert pending_child.stop_received.is_set(), "unsubmitted unit lost parent cancellation ownership"
-            assert not pending_child.started.is_set()
-        assert not outcome.done(), "dispatch returned while its child still owned resources"
-        assert child.close_count == 0
-        child.allow_finish.set()
         result = outcome.result(timeout=5)
-        if background_child is None:
-            assert "SYNCHRONOUSLY" in result["note"]
-            assert result["results"][0]["status"] == "interrupted"
-        else:
-            assert result["status"] == "dispatched"
-            assert result["inline_results"][0]["status"] == "interrupted"
-            assert not background_child.stop_received.is_set()
-            assert pending_child.unwinding.wait(5)
-            assert pending_child.observed_interrupt == (stop_message, stop_kind == "hard")
-        assert child.finished.is_set()
+        if stop_timing == "running":  # Stop after the bounded response, not during an inline fallback.
+            request_stop(stop_message)
+        assert not child.started.is_set(), "rejected child ran synchronously"
+        assert child.closed.is_set()
         assert child.close_count == 1
         assert not child.closed_while_running
+        if stop_timing == "during_admission":
+            assert child.stop_received.is_set(), "admission detach lost pending parent stop"
+        if background_child is None:
+            assert result["status"] == "busy"
+            assert result["count"] == 0
+            assert result["rejected_task_indexes"] == [0]
+        else:
+            assert result["status"] == "partially_dispatched"
+            assert result["count"] == 1
+            assert result["accepted_task_indexes"] == [0]
+            assert result["rejected_task_indexes"] == [1, 2]
+            assert not background_child.stop_received.is_set()
+            assert pending_child is not None
+            assert not pending_child.started.is_set()
+            assert pending_child.closed.is_set()
+            assert pending_child.close_count == 1
         assert parent._active_children == []
     finally:
         continue_admission.set()
-        if not child.finished.is_set():
-            child.hard_interrupt("test teardown")
         child.allow_finish.set()
         worker.join(timeout=5)
         release_occupier.set()
         if background_child is not None:
             async_delegation.interrupt_for_session(parent_session_id=parent.session_id)
-            for extra in (background_child, pending_child):
-                extra.allow_finish.set()
-                assert extra.closed.wait(5)
-                assert extra.finished.is_set()
-                assert extra.close_count == 1
-                assert not extra.closed_while_running
+            background_child.allow_finish.set()
+            assert background_child.closed.wait(5)
+            assert background_child.finished.is_set()
+            assert background_child.close_count == 1
+            assert not background_child.closed_while_running
             completed_ids = {registry_state.get(timeout=5)["delegation_id"] for _ in accepted_ids}
             assert completed_ids == set(accepted_ids)
         if rejection == "capacity":

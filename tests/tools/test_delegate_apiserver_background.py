@@ -4,8 +4,8 @@ Previously async_delivery_supported()=False forced SYNCHRONOUS execution for
 every background dispatch on the API server, blocking the whole turn. Now
 that background completions can wake the originating session via the
 /v1/chat/completions self-post (gateway/wake.py), a session-continuable
-turn (raw session id bound as the api_server chat_id) dispatches async; only
-session-id-less one-shot requests keep the sync fallback.
+turn declaring a server-history consumer dispatches async; stateless requests
+without a consumer are rejected, never silently run inline.
 
 The wake target must be captured from the request-scoped chat_id binding,
 NOT from HERMES_SESSION_ID: constructing a child agent calls
@@ -147,9 +147,8 @@ def test_apiserver_session_with_id_dispatches_background(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_apiserver_session_without_id_stays_synchronous(monkeypatch):
-    """No session id to wake → keep the sync fallback (a detached result
-    would never re-enter any conversation)."""
+def test_apiserver_session_without_consumer_rejects_background(monkeypatch):
+    """No consumer to receive the result: reject without silently running inline."""
     dt = _patch_delegate(monkeypatch)
     set_session_vars(
         platform="api_server",
@@ -164,6 +163,7 @@ def test_apiserver_session_without_id_stays_synchronous(monkeypatch):
         background=True, parent_agent=_fake_parent(),
     )
     parsed = json.loads(out)
-    assert parsed.get("status") != "dispatched", parsed
-    assert "SYNCHRONOUSLY" in parsed.get("note", "")
+    assert parsed["status"] == "unsupported", parsed
+    assert parsed["count"] == 0
+    assert parsed["rejected_tasks"][0]["start_state"] == "not_started"
     assert process_registry.completion_queue.empty()

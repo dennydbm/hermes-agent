@@ -1,4 +1,4 @@
-"""Regression test for #86632: cron's synchronous delegate_task fallback must
+"""Regression test for #86632: cron's deliberate synchronous delegate_task join must
 return after the child completes — the automatic background review must not
 fire inside the delegated child.
 
@@ -127,9 +127,9 @@ def test_cron_sync_fallback_returns_and_spawns_no_review_fork(monkeypatch):
     done: dict = {}
 
     def _call_delegate_task():
-        # Cron declares the channel stateless (#66617): async delivery is
-        # unsupported and there is no bound origin session id to wake, so
-        # delegate_task must run the batch synchronously.
+        # Real cron provenance selects foreground before async admission.
+        from gateway.session_context import set_session_vars
+        set_session_vars(cron_session="1", async_delivery=False)
         with (
             patch(
                 "gateway.session_context.async_delivery_supported",
